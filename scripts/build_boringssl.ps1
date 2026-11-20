@@ -65,7 +65,10 @@ $cmakeArgs = @(
 )
 
 if ($Arch -ieq "arm64") {
+    # BoringSSL's ARM64 .S files use Clang/GAS syntax rather than MSVC armasm64, and
+    # CMake's enable_language(ASM) with cl.exe fails on MSVC_RUNTIME_LIBRARY.
     $cmakeArgs += "-DCMAKE_SYSTEM_PROCESSOR=ARM64"
+    $cmakeArgs += "-DOPENSSL_NO_ASM=ON"
 }
 
 Write-Host "Configuring BoringSSL with CMake + Ninja..."

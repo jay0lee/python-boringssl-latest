@@ -57,7 +57,9 @@ def probe_c_snippet(compiler, include_dir, snippet):
         src = Path(tmpdir) / "probe.c"
         src.write_text(snippet, encoding="utf-8")
         if is_msvc:
-            cmd = [compiler, "/nologo", "/Zs", f"/I{include_dir}", str(src)]
+            # /we4013 is required so MSVC treats implicit function declarations (C4013) as an error,
+            # matching GCC/Clang's -Werror=implicit-function-declaration.
+            cmd = [compiler, "/nologo", "/Zs", "/we4013", f"/I{include_dir}", str(src)]
         else:
             cmd = [
                 compiler,

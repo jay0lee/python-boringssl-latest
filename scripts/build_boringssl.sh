@@ -70,6 +70,14 @@ CMAKE_EXTRA_ARGS=(
   -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -Wno-error"
 )
 
+# Strip hardcoded -Werror from BoringSSL's CMakeLists.txt so newer compilers (e.g. GCC 15 on Ubuntu 26.04)
+# do not fail on false-positive optimization warnings in release builds.
+python3 -c '
+import pathlib
+p = pathlib.Path("CMakeLists.txt")
+p.write_text(p.read_text(encoding="utf-8").replace("-Werror ", ""), encoding="utf-8")
+'
+
 echo "Configuring BoringSSL with CMake..."
 cmake ${CMAKE_GENERATOR_ARGS[@]+"${CMAKE_GENERATOR_ARGS[@]}"} \
   -S "$SOURCE_DIR" \
