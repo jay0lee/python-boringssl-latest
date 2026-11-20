@@ -65,12 +65,10 @@ if command -v ninja >/dev/null 2>&1; then
   CMAKE_GENERATOR_ARGS=(-G Ninja)
 fi
 
-CMAKE_EXTRA_ARGS=()
-if [[ "$RUNNER_OS" == "Darwin" || "$RUNNER_OS" == "macOS" ]]; then
-  CMAKE_EXTRA_ARGS+=(-DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG")
-else
-  CMAKE_EXTRA_ARGS+=(-DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG")
-fi
+CMAKE_EXTRA_ARGS=(
+  -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -Wno-error"
+  -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -Wno-error"
+)
 
 echo "Configuring BoringSSL with CMake..."
 cmake ${CMAKE_GENERATOR_ARGS[@]+"${CMAKE_GENERATOR_ARGS[@]}"} \

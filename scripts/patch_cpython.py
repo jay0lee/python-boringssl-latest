@@ -230,6 +230,36 @@ def generate_compat_header(caps, disable_tls1x=True):
         "#  define OPENSSL_THREADS 1",
         "#endif",
         "",
+        "#ifdef OPENSSL_HEADER_EVP_H",
+        "/* BoringSSL puts EVP_MD_do_all() in libdecrepit.a rather than libcrypto.a.",
+        " * Enumerate only real digests implemented in libcrypto.a and resolvable via",
+        " * EVP_get_digestbyname() so _hashlib links cleanly without libdecrepit and",
+        " * hashlib.algorithms_available contains only valid digests. */",
+        "static inline void _py_bssl_evp_md_do_all(",
+        "    void (*callback)(const EVP_MD *md, const char *from, const char *to, void *arg),",
+        "    void *arg) {",
+        "    const struct {",
+        "        const EVP_MD *(*fn)(void);",
+        "        const char *name;",
+        "    } digests[] = {",
+        "        { EVP_md5, \"md5\" },",
+        "        { EVP_sha1, \"sha1\" },",
+        "        { EVP_sha224, \"sha224\" },",
+        "        { EVP_sha256, \"sha256\" },",
+        "        { EVP_sha384, \"sha384\" },",
+        "        { EVP_sha512, \"sha512\" },",
+        "        { EVP_sha512_256, \"sha512-256\" },",
+        "    };",
+        "    for (size_t i = 0; i < sizeof(digests) / sizeof(digests[0]); i++) {",
+        "        const EVP_MD *md = digests[i].fn();",
+        "        if (md != NULL && EVP_get_digestbyname(digests[i].name) != NULL) {",
+        "            callback(md, digests[i].name, NULL, arg);",
+        "        }",
+        "    }",
+        "}",
+        "#define EVP_MD_do_all(cb, arg) _py_bssl_evp_md_do_all((cb), (arg))",
+        "#endif /* OPENSSL_HEADER_EVP_H */",
+        "",
     ]
 
     if disable_tls1x:
@@ -467,6 +497,45 @@ def generate_compat_header(caps, disable_tls1x=True):
     return "\n".join(lines)
 
 
+def patch_boringssl_win32_headers(boringssl_dir):
+    """
+    On Windows, <wincrypt.h> (included by Modules/_ssl.c beforeModules/_ssl.h -> <openssl/evp.h>)
+    defines macros like X509_NAME, X509_EXTENSIONS, PKCS7_SIGNER_INFO, and OCSP_REQUEST.
+    OpenSSL's <openssl/types.h> #undefs these, whereas BoringSSL's <openssl/base.h> does not.
+    Inject the #undef guard into the installed <openssl/base.h>.
+    """
+    base_h = Path(boringssl_dir) / "include" / "openssl" / "base.h"
+    if not base_h.is_file():
+        return
+    text = base_h.read_text(encoding="utf-8")
+    marker = "/* PY_BORINGSSL_WINCRYPT_UNDEF */"
+    if marker in text:
+        print("  [skip] openssl/base.h already has Windows wincrypt.h #undef guard")
+        return
+
+    undef_block = (
+        f"\n{marker}\n"
+        "#if defined(_WIN32) || defined(MS_WINDOWS)\n"
+        "#  undef X509_NAME\n"
+        "#  undef X509_EXTENSIONS\n"
+        "#  undef X509_CERT_PAIR\n"
+        "#  undef PKCS7_ISSUER_AND_SERIAL\n"
+        "#  undef PKCS7_SIGNER_INFO\n"
+        "#  undef OCSP_REQUEST\n"
+        "#  undef OCSP_RESPONSE\n"
+        "#endif\n"
+    )
+    anchor = re.search(r"(#define\s+OPENSSL_HEADER_BASE_H\b[^\n]*\n)", text)
+    if anchor:
+        idx = anchor.end()
+        new_text = text[:idx] + undef_block + text[idx:]
+    else:
+        new_text = undef_block + text
+
+    base_h.write_text(new_text, encoding="utf-8")
+    print("  [patched] openssl/base.h: injected Windows wincrypt.h macro #undef guard")
+
+
 def inject_compat_include(filepath):
     """Semantically insert `#include "boringssl_compat.h"` right before `#ifndef OPENSSL_THREADS`."""
     path = Path(filepath)
@@ -603,11 +672,12 @@ def patch_ssl_x509_store_backport(cpython_dir, has_x509_store_get1_objects):
         print("  [skip] _ssl.c: X509_STORE_get1_objects backport pattern not present")
 
 
-def patch_configure_hashlib_check(cpython_dir, has_sha3_512_nid, cxx_lib=""):
+def patch_configure_hashlib_check(cpython_dir, has_sha3_512_nid, cxx_lib="", static_exclude_libs=False):
     """
     1. Remove NID_sha3_512 requirement from configure's hashlib link probe when BoringSSL lacks it.
-    2. Append required C++ runtime flag (-lc++ / -lstdc++) to OPENSSL_LIBS in configure when needed
-       by static BoringSSL (whose libssl/libcrypto contain C++17 objects).
+    2. Add <openssl/objects.h> to configure's hashlib probe (BoringSSL's evp.h omits it).
+    3. Configure OPENSSL_LIBS in configure with required C++ runtime (-lc++ / -lstdc++)
+       and optional GNU ld --exclude-libs static hiding on Linux.
     """
     for fname in ("configure", "configure.ac"):
         fpath = Path(cpython_dir) / fname
@@ -636,45 +706,25 @@ def patch_configure_hashlib_check(cpython_dir, has_sha3_512_nid, cxx_lib=""):
             modified = True
             print(f"  [patched] {fname}: added <openssl/objects.h> to hashlib probe ({count} occurrence(s))")
 
-        if cxx_lib and fname == "configure":
+        if fname == "configure" and (cxx_lib or static_exclude_libs):
             old_line = 'OPENSSL_LIBS="-lssl -lcrypto"'
-            new_line = f'OPENSSL_LIBS="-lssl -lcrypto {cxx_lib}"'
+            extra = f" {cxx_lib}" if cxx_lib else ""
+            if static_exclude_libs:
+                new_line = (
+                    'OPENSSL_LIBS="-l:libssl.a -Wl,--exclude-libs,libssl.a '
+                    f'-l:libcrypto.a -Wl,--exclude-libs,libcrypto.a{extra}"'
+                )
+            else:
+                new_line = f'OPENSSL_LIBS="-lssl -lcrypto{extra}"'
             if old_line in text:
                 text = text.replace(old_line, new_line)
                 modified = True
-                print(f"  [patched] {fname}: appended {cxx_lib} to OPENSSL_LIBS")
+                print(f"  [patched] {fname}: set {new_line}")
             elif new_line in text:
-                print(f"  [skip] {fname}: OPENSSL_LIBS already includes {cxx_lib}")
+                print(f"  [skip] {fname}: OPENSSL_LIBS already configured")
 
         if modified:
             fpath.write_text(text, encoding="utf-8")
-
-
-def patch_modules_setup_static(cpython_dir, exclude_libs=True, cxx_lib=""):
-    """Enable static linking of libssl.a / libcrypto.a in Modules/Setup (Unix)."""
-    setup_path = Path(cpython_dir) / "Modules" / "Setup"
-    if not setup_path.is_file():
-        return
-    text = setup_path.read_text(encoding="utf-8")
-    if "\n_ssl _ssl.c " in text and "\n_hashlib _hashopenssl.c " in text:
-        print("  [skip] Modules/Setup already configured for static OpenSSL/BoringSSL")
-        return
-
-    if exclude_libs:
-        extra = f" {cxx_lib}" if cxx_lib else ""
-        static_block = (
-            "\n# BoringSSL static linking (auto-configured by patch_cpython.py)\n"
-            "_ssl _ssl.c $(OPENSSL_INCLUDES) $(OPENSSL_LDFLAGS) \\\n"
-            "    -l:libssl.a -Wl,--exclude-libs,libssl.a \\\n"
-            f"    -l:libcrypto.a -Wl,--exclude-libs,libcrypto.a{extra}\n"
-            "_hashlib _hashopenssl.c $(OPENSSL_INCLUDES) $(OPENSSL_LDFLAGS) \\\n"
-            f"    -l:libcrypto.a -Wl,--exclude-libs,libcrypto.a{extra}\n"
-        )
-    else:
-        return
-
-    setup_path.write_text(text + static_block, encoding="utf-8")
-    print("  [patched] Modules/Setup: enabled static BoringSSL linking with --exclude-libs")
 
 
 def main():
@@ -691,6 +741,7 @@ def main():
     print(f"Probing BoringSSL installation at: {args.boringssl_dir}")
     print(f"Using C compiler probe: {compiler or 'None (header-scan fallback)'}")
 
+    patch_boringssl_win32_headers(args.boringssl_dir)
     caps = probe_capabilities(args.boringssl_dir, compiler=compiler)
     print("Detected BoringSSL capabilities:")
     for k, v in sorted(caps.items()):
@@ -711,10 +762,12 @@ def main():
     inject_compat_include(Path(args.cpython_dir) / "Modules" / "_hashopenssl.c")
     patch_hashopenssl_xof(args.cpython_dir)
     patch_ssl_x509_store_backport(args.cpython_dir, caps["has_x509_store_get1_objects"])
-    patch_configure_hashlib_check(args.cpython_dir, caps["has_sha3_512_nid"], cxx_lib=cxx_lib)
-
-    if args.static_exclude_libs:
-        patch_modules_setup_static(args.cpython_dir, exclude_libs=True, cxx_lib=cxx_lib)
+    patch_configure_hashlib_check(
+        args.cpython_dir,
+        caps["has_sha3_512_nid"],
+        cxx_lib=cxx_lib,
+        static_exclude_libs=args.static_exclude_libs,
+    )
 
     print("CPython BoringSSL adaptation completed successfully.")
 

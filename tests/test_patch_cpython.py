@@ -9,6 +9,7 @@ from pathlib import Path
 from scripts.patch_cpython import (
     generate_compat_header,
     inject_compat_include,
+    patch_boringssl_win32_headers,
     patch_configure_hashlib_check,
     patch_hashopenssl_xof,
     patch_ssl_x509_store_backport,
@@ -44,6 +45,7 @@ class TestPatchCPython(unittest.TestCase):
         hdr = generate_compat_header(all_present, disable_tls1x=True)
         self.assertIn("OPENSSL_NO_TLS1", hdr)
         self.assertIn("_py_bssl_ctx_set_min_proto_version", hdr)
+        self.assertIn("_py_bssl_evp_md_do_all", hdr)
         self.assertNotIn("SSL_CTX_set_ciphersuites(", hdr)
         self.assertNotIn("SSL_read_ex(", hdr)
         self.assertNotIn("SSL_psk_client_cb_func", hdr)
@@ -112,6 +114,14 @@ class TestPatchCPython(unittest.TestCase):
         self.assertNotIn("NID_sha3_512", conf_out)
         self.assertEqual(conf_out.count("#include <openssl/objects.h>"), 1)
         self.assertIn('OPENSSL_LIBS="-lssl -lcrypto -lc++"', conf_out)
+
+        bssl_inc = self.tmp / "include" / "openssl"
+        bssl_inc.mkdir(parents=True)
+        base_h = bssl_inc / "base.h"
+        base_h.write_text("#ifndef OPENSSL_HEADER_BASE_H\n#define OPENSSL_HEADER_BASE_H\ntypedef struct X509_name_st X509_NAME;\n#endif\n", encoding="utf-8")
+        for _ in range(2):
+            patch_boringssl_win32_headers(self.tmp)
+        self.assertEqual(base_h.read_text().count("undef X509_NAME"), 1)
 
 
 if __name__ == "__main__":

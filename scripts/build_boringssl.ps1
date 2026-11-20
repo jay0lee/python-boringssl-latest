@@ -51,6 +51,8 @@ if (Test-Path $buildDir) {
 }
 
 # BoringSSL BUILDING.md requires Ninja on Windows (Visual Studio generator does not assemble ASM files).
+# Note: Do not set CMAKE_MSVC_RUNTIME_LIBRARY globally; CMake Release already defaults to /MD
+# and setting it globally fails CMake's ASM language check on Windows ARM64.
 $cmakeArgs = @(
     "-G", "Ninja",
     "-S", $SourceDir,
@@ -58,7 +60,6 @@ $cmakeArgs = @(
     "-DCMAKE_BUILD_TYPE=Release",
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBUILD_TESTING=OFF",
-    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
     "-DCMAKE_INSTALL_PREFIX=$InstallDir",
     "-DCMAKE_INSTALL_LIBDIR=lib"
 )
