@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <!-- Point CPython MSBuild directly to our freshly compiled BoringSSL installation -->
+    <opensslDir Condition="$(BoringSSLInstallDir) != ''">$(BoringSSLInstallDir)\</opensslDir>
+    <opensslIncludeDir Condition="$(BoringSSLInstallDir) != ''">$(BoringSSLInstallDir)\include</opensslIncludeDir>
+    <opensslOutDir Condition="$(BoringSSLInstallDir) != ''">$(BoringSSLInstallDir)\lib</opensslOutDir>
+    <!-- Skip copying runtime DLLs for static BoringSSL builds -->
+    <SkipCopySSLDLL Condition="$(SkipCopySSLDLL) == ''">true</SkipCopySSLDLL>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories Condition="'$(ProjectName)' == '_ssl' or '$(ProjectName)' == '_hashlib'">$(opensslIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- Use BoringSSL's native default cipher suites instead of OpenSSL @SECLEVEL syntax -->
+      <PreprocessorDefinitions Condition="'$(ProjectName)' == '_ssl'">PY_SSL_DEFAULT_CIPHERS=2;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories Condition="'$(ProjectName)' == '_ssl' or '$(ProjectName)' == '_hashlib'">$(opensslOutDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- Static BoringSSL on Windows requires Windows socket, crypto, and security libraries -->
+      <AdditionalDependencies Condition="'$(ProjectName)' == '_ssl' or '$(ProjectName)' == '_hashlib'">ws2_32.lib;crypt32.lib;advapi32.lib;user32.lib;libcrypto.lib;libssl.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

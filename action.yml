@@ -1,0 +1,105 @@
+name: 'Setup Latest Python and BoringSSL'
+description: 'Installs the latest stable version of Python compiled with BoringSSL HEAD across Linux, macOS, and Windows.'
+author: 'GAM Team'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  repository:
+    description: 'GitHub repository containing the pre-compiled Python + BoringSSL releases'
+    required: false
+    default: 'jay0lee/python-boringssl-latest'
+  version:
+    description: 'Target release tag (e.g. v1.2026.11.20.0400) or "latest" to automatically fetch the newest stable release (defaults to action ref if pinned, else latest)'
+    required: false
+    default: ''
+  install-dir:
+    description: 'Custom path where Python and BoringSSL should be installed (defaults to runner tool cache)'
+    required: false
+    default: ''
+  set-env:
+    description: 'Automatically export PATH, PYTHON, BORINGSSL_INSTALL_PATH, OPENSSL_INSTALL_PATH, LD_LIBRARY_PATH, and DYLD_LIBRARY_PATH'
+    required: false
+    default: 'true'
+  quiet:
+    description: 'Suppress display of build configuration and compiler flags summary (defaults to false)'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'GitHub token used to query releases and download assets'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  python-path:
+    description: 'Full path to the installed Python executable'
+    value: ${{ steps.install.outputs.python-path }}
+  python-version:
+    description: 'Installed Python version'
+    value: ${{ steps.install.outputs.python-version }}
+  boringssl-path:
+    description: 'Root directory of the installed BoringSSL headers and static libraries'
+    value: ${{ steps.install.outputs.boringssl-path }}
+  boringssl-version:
+    description: 'Version/commit of BoringSSL linked with Python'
+    value: ${{ steps.install.outputs.boringssl-version }}
+  build-summary:
+    description: 'Text summary of configuration and compiler flags used for Python and BoringSSL'
+    value: ${{ steps.install.outputs.build-summary }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download and install Python with BoringSSL
+      id: install
+      shell: bash
+      run: |
+        export PYTHONIOENCODING="utf-8"
+        export PYTHONUTF8=1
+
+        if command -v python3 >/dev/null 2>&1; then
+          PY_CMD="python3"
+        elif command -v python >/dev/null 2>&1; then
+          PY_CMD="python"
+        else
+          echo "Error: Python interpreter is required to run the installer script" >&2
+          exit 1
+        fi
+
+        ACTION_DIR="${{ github.action_path }}"
+        REPO="${{ inputs.repository }}"
+        if [ -z "$REPO" ]; then
+          REPO="jay0lee/python-boringssl-latest"
+        fi
+
+        TARGET_VERSION="${{ inputs.version }}"
+        ACTION_REF="${{ github.action_ref }}"
+
+        if [ -z "$TARGET_VERSION" ]; then
+          if [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+ ]]; then
+            TARGET_VERSION="$ACTION_REF"
+          else
+            TARGET_VERSION="latest"
+          fi
+        fi
+
+        ARGS=(
+          "--repo" "$REPO"
+          "--version" "$TARGET_VERSION"
+          "--token" "${{ inputs.github-token }}"
+        )
+
+        if [ "${{ inputs.set-env }}" = "true" ]; then
+          ARGS+=("--set-env")
+        fi
+
+        if [ -n "${{ inputs.install-dir }}" ]; then
+          ARGS+=("--install-dir" "${{ inputs.install-dir }}")
+        fi
+
+        if [ "${{ inputs.quiet }}" = "true" ]; then
+          ARGS+=("--quiet")
+        fi
+
+        "$PY_CMD" "${ACTION_DIR}/scripts/install.py" "${ARGS[@]}"

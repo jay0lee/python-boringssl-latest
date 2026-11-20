@@ -1,0 +1,483 @@
+name: 'Build and Release Python + BoringSSL'
+
+on:
+  schedule:
+    # Run weekly every Sunday at 04:00 UTC
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Specific Python version (leave blank for latest stable)'
+        required: false
+        default: ''
+      boringssl_ref:
+        description: 'Specific BoringSSL git ref/commit (leave blank for main HEAD)'
+        required: false
+        default: ''
+      release_tag:
+        description: 'Specific release tag (leave blank for automatic v1.YYYY.MM.DD.HHMM)'
+        required: false
+        default: ''
+      force_rebuild:
+        description: 'Force rebuild even if release already exists'
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-and-release.yml'
+      - 'scripts/**'
+      - 'patches/**'
+      - 'action.yml'
+
+permissions:
+  contents: write
+  packages: write
+  actions: read
+
+jobs:
+  discover:
+    name: 'Discover Runners and Versions'
+    runs-on: ubuntu-slim
+    outputs:
+      matrix: ${{ steps.discovery.outputs.matrix }}
+      python_version: ${{ steps.discovery.outputs.python_version }}
+      boringssl_version: ${{ steps.discovery.outputs.boringssl_version }}
+      boringssl_commit: ${{ steps.discovery.outputs.boringssl_commit }}
+      release_tag: ${{ steps.discovery.outputs.release_tag }}
+      should_build: ${{ steps.check-release.outputs.should_build }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Discover dynamic matrix and versions
+        id: discovery
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS=()
+          if [ -n "${{ github.event.inputs.python_version }}" ]; then
+            ARGS+=("--python-version" "${{ github.event.inputs.python_version }}")
+          fi
+          if [ -n "${{ github.event.inputs.boringssl_ref }}" ]; then
+            ARGS+=("--boringssl-ref" "${{ github.event.inputs.boringssl_ref }}")
+          fi
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            ARGS+=("--release-tag" "${{ github.event.inputs.release_tag }}")
+          fi
+          python3 scripts/discover_matrix.py "${ARGS[@]}"
+
+      - name: Check if release already exists
+        id: check-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.discovery.outputs.release_tag }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: |
+          if [ "$FORCE_REBUILD" = "true" ]; then
+            echo "Force rebuild requested."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists and releases are immutable. Skipping build."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Release $RELEASE_TAG does not exist yet. Proceeding with build."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: ${{ matrix.name }}
+    needs: discover
+    if: needs.discover.outputs.should_build == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    env:
+      PYTHON_VERSION: ${{ needs.discover.outputs.python_version }}
+      BORINGSSL_VERSION: ${{ needs.discover.outputs.boringssl_version }}
+      BORINGSSL_COMMIT: ${{ needs.discover.outputs.boringssl_commit }}
+      RUNNER_LABEL: ${{ matrix.os }}
+      RUNNER_ARCH: ${{ matrix.arch }}
+      OS_FAMILY: ${{ matrix.os_family }}
+      PACKAGE_ALIAS: ${{ matrix.alias }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # Windows MSVC environment setup
+      - name: Setup MSVC developer command prompt (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        run: |
+          .\scripts\setup_msvc.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Setup Ninja (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+
+      - name: Setup NASM (Windows x64)
+        if: matrix.os_family == 'windows' && matrix.arch == 'x64'
+        shell: powershell
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      # Linux dependencies setup
+      - name: Install Linux build dependencies
+        if: matrix.os_family == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build pkg-config libffi-dev zlib1g-dev libsqlite3-dev libbz2-dev liblzma-dev patchelf
+
+      # Build BoringSSL (Unix)
+      - name: Build BoringSSL (Linux / macOS)
+        if: matrix.os_family != 'windows'
+        run: |
+          BORINGSSL_SRC="${RUNNER_TEMP}/src/boringssl"
+          BORINGSSL_INSTALL="${RUNNER_TEMP}/install/ssl"
+          ./scripts/build_boringssl.sh "$BORINGSSL_COMMIT" "$BORINGSSL_SRC" "$BORINGSSL_INSTALL"
+
+      # Build BoringSSL (Windows)
+      - name: Build BoringSSL (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        run: |
+          $bsslSrc = Join-Path $env:RUNNER_TEMP "src\boringssl"
+          $bsslInstall = Join-Path $env:RUNNER_TEMP "install\ssl"
+          .\scripts\build_boringssl.ps1 -BoringSSLRef $env:BORINGSSL_COMMIT -SourceDir $bsslSrc -InstallDir $bsslInstall -Arch $env:RUNNER_ARCH
+
+      # Build Python (Unix)
+      - name: Build Python (Linux / macOS)
+        if: matrix.os_family != 'windows'
+        run: |
+          BORINGSSL_INSTALL="${RUNNER_TEMP}/install/ssl"
+          PYTHON_SRC="${RUNNER_TEMP}/src/cpython"
+          PYTHON_INSTALL="${RUNNER_TEMP}/install/python"
+          ./scripts/build_python.sh "$PYTHON_VERSION" "$BORINGSSL_VERSION" "$BORINGSSL_INSTALL" "$PYTHON_SRC" "$PYTHON_INSTALL"
+
+      # Build Python (Windows)
+      - name: Build Python (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        run: |
+          $bsslInstall = Join-Path $env:RUNNER_TEMP "install\ssl"
+          $pySrc = Join-Path $env:RUNNER_TEMP "src\cpython"
+          $pyInstall = Join-Path $env:RUNNER_TEMP "install\python"
+          .\scripts\build_python.ps1 -PythonVersion $env:PYTHON_VERSION -BoringSSLVersion $env:BORINGSSL_VERSION -BoringSSLInstallDir $bsslInstall -SourceDir $pySrc -InstallDir $pyInstall -Arch $env:RUNNER_ARCH
+
+      # Verify Native Binary Architecture (Linux / macOS)
+      - name: Verify native binary architecture (Linux / macOS)
+        if: matrix.os_family != 'windows'
+        run: |
+          PYTHON_BIN="${RUNNER_TEMP}/install/python/bin/python3"
+          BSSL_BIN="${RUNNER_TEMP}/install/ssl/bin/bssl"
+          EXPECTED_ARCH="${RUNNER_ARCH}"
+
+          echo "=================================================="
+          echo "Verifying Native Binary Architecture on ${RUNNER_OS} (${EXPECTED_ARCH})"
+          echo "=================================================="
+
+          if [[ "${OS_FAMILY}" == "macos" ]]; then
+            lipo -info "${PYTHON_BIN}"
+            file "${PYTHON_BIN}"
+            lipo -info "${BSSL_BIN}"
+            file "${BSSL_BIN}"
+
+            if [[ "${EXPECTED_ARCH}" == "arm64" ]]; then
+              lipo -info "${PYTHON_BIN}" | grep -w "arm64" || { echo "FATAL: ${PYTHON_BIN} is not native arm64!"; exit 1; }
+              lipo -info "${BSSL_BIN}" | grep -w "arm64" || { echo "FATAL: ${BSSL_BIN} is not native arm64!"; exit 1; }
+              if lipo -info "${PYTHON_BIN}" | grep -w "x86_64"; then
+                echo "FATAL: ${PYTHON_BIN} contains x86_64 binary on arm64 runner!"; exit 1;
+              fi
+            elif [[ "${EXPECTED_ARCH}" == "x64" ]]; then
+              lipo -info "${PYTHON_BIN}" | grep -w "x86_64" || { echo "FATAL: ${PYTHON_BIN} is not native x86_64!"; exit 1; }
+              lipo -info "${BSSL_BIN}" | grep -w "x86_64" || { echo "FATAL: ${BSSL_BIN} is not native x86_64!"; exit 1; }
+              if lipo -info "${PYTHON_BIN}" | grep -w "arm64"; then
+                echo "FATAL: ${PYTHON_BIN} contains arm64 binary on x64 runner!"; exit 1;
+              fi
+            fi
+
+          elif [[ "${OS_FAMILY}" == "linux" ]]; then
+            file "${PYTHON_BIN}"
+            readelf -h "${PYTHON_BIN}" | grep "Machine:"
+            file "${BSSL_BIN}"
+            readelf -h "${BSSL_BIN}" | grep "Machine:"
+
+            if [[ "${EXPECTED_ARCH}" == "arm64" ]]; then
+              readelf -h "${PYTHON_BIN}" | grep -i "aarch64" || { echo "FATAL: ${PYTHON_BIN} is not native AArch64!"; exit 1; }
+              readelf -h "${BSSL_BIN}" | grep -i "aarch64" || { echo "FATAL: ${BSSL_BIN} is not native AArch64!"; exit 1; }
+            elif [[ "${EXPECTED_ARCH}" == "x64" ]]; then
+              readelf -h "${PYTHON_BIN}" | grep -i "x86-64" || { echo "FATAL: ${PYTHON_BIN} is not native x86-64!"; exit 1; }
+              readelf -h "${BSSL_BIN}" | grep -i "x86-64" || { echo "FATAL: ${BSSL_BIN} is not native x86-64!"; exit 1; }
+            fi
+          fi
+          echo "Native binary architecture successfully verified for all Unix binaries."
+
+      # Validate Runtime (Linux / macOS)
+      - name: Validate runtime (Linux / macOS)
+        if: matrix.os_family != 'windows'
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          PYTHON_INSTALL="${RUNNER_TEMP}/install/python"
+          BORINGSSL_INSTALL="${RUNNER_TEMP}/install/ssl"
+          export PATH="${PYTHON_INSTALL}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${PYTHON_INSTALL}/lib:${BORINGSSL_INSTALL}/lib:${LD_LIBRARY_PATH:-}"
+          export DYLD_LIBRARY_PATH="${PYTHON_INSTALL}/lib:${BORINGSSL_INSTALL}/lib:${DYLD_LIBRARY_PATH:-}"
+          echo "Verifying Python and BoringSSL installation:"
+          "${PYTHON_INSTALL}/bin/python3" -VV
+          "${PYTHON_INSTALL}/bin/python3" -c "import ssl; print(f'SSL Library in Python: {ssl.OPENSSL_VERSION}')"
+          echo "Running GAM / GYB Validation Suite..."
+          "${PYTHON_INSTALL}/bin/python3" -X faulthandler scripts/validate_runtime.py --expected-arch "${RUNNER_ARCH}"
+
+      # Verify Native Binary Architecture (Windows)
+      - name: Verify native binary architecture (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        run: |
+          $pyBin = Join-Path $env:RUNNER_TEMP "install\python\python.exe"
+          $pyDll = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP "install\python") -Filter "python3*.dll" | Select-Object -First 1 -ExpandProperty FullName
+          $bsslBin = Join-Path $env:RUNNER_TEMP "install\ssl\bin\bssl.exe"
+          $expectedArch = $env:RUNNER_ARCH.ToLower()
+
+          function Assert-PEArch {
+              param([string]$Path, [string]$Expected)
+              if (-not (Test-Path $Path)) { throw "Binary not found: $Path" }
+              $bytes = [System.IO.File]::ReadAllBytes($Path)
+              $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+              $machine = [System.BitConverter]::ToUInt16($bytes, $peOffset + 4)
+              $actual = switch ($machine) {
+                  0x8664 { "x64" }
+                  0xAA64 { "arm64" }
+                  0x014C { "x86" }
+                  default { "0x{0:X4}" -f $machine }
+              }
+              Write-Host "PE Binary: $Path -> Machine: $actual (Expected: $Expected)"
+              if ($actual -ne $Expected) {
+                  throw "FATAL ARCHITECTURE MISMATCH: $Path is $actual, but expected native $Expected!"
+              }
+          }
+
+          Assert-PEArch -Path $pyBin -Expected $expectedArch
+          if ($pyDll) { Assert-PEArch -Path $pyDll -Expected $expectedArch }
+          if (Test-Path $bsslBin) { Assert-PEArch -Path $bsslBin -Expected $expectedArch }
+          Write-Host "Native PE binary architecture successfully verified for all Windows binaries."
+
+      # Validate Runtime (Windows)
+      - name: Validate runtime (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          $py = Join-Path $env:RUNNER_TEMP "install\python\python.exe"
+          Write-Host "Verifying Python and BoringSSL installation:"
+          & $py -VV
+          & $py -c "import ssl; print(f'SSL Library in Python: {ssl.OPENSSL_VERSION}')"
+          Write-Host "Running GAM / GYB Validation Suite..."
+          & $py -X faulthandler scripts\validate_runtime.py --expected-arch $env:RUNNER_ARCH
+
+      # Generate Build Configuration Summary
+      - name: Generate build configuration summary (Unix)
+        if: matrix.os_family != 'windows'
+        run: |
+          python3 scripts/build_info.py \
+            --install-dir "${RUNNER_TEMP}/install" \
+            --runner-label "${RUNNER_LABEL}" \
+            --runner-arch "${RUNNER_ARCH}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --output "${RUNNER_TEMP}/install/BUILD_INFO.txt"
+          cp "${RUNNER_TEMP}/install/BUILD_INFO.txt" "${RUNNER_TEMP}/install/python/BUILD_INFO.txt" 2>/dev/null || true
+          cp "${RUNNER_TEMP}/install/BUILD_INFO.txt" "${RUNNER_TEMP}/install/ssl/BUILD_INFO.txt" 2>/dev/null || true
+
+      - name: Generate build configuration summary (Windows)
+        if: matrix.os_family == 'windows'
+        shell: powershell
+        run: |
+          $py = Join-Path $env:RUNNER_TEMP "install\python\python.exe"
+          $installDir = Join-Path $env:RUNNER_TEMP "install"
+          $outPath = Join-Path $installDir "BUILD_INFO.txt"
+          & $py scripts\build_info.py `
+            --install-dir $installDir `
+            --runner-label $env:RUNNER_LABEL `
+            --runner-arch $env:RUNNER_ARCH `
+            --commit-sha $env:GITHUB_SHA `
+            --output $outPath
+          Copy-Item $outPath (Join-Path $installDir "python\BUILD_INFO.txt") -Force -ErrorAction SilentlyContinue
+          Copy-Item $outPath (Join-Path $installDir "ssl\BUILD_INFO.txt") -Force -ErrorAction SilentlyContinue
+
+      # Package bundle
+      - name: Package compiled bundle (Unix)
+        if: matrix.os_family != 'windows'
+        id: package-unix
+        run: |
+          PACKAGE_NAME="python-${PYTHON_VERSION}-boringssl-${BORINGSSL_VERSION}-${RUNNER_LABEL}-${RUNNER_ARCH}.tar.xz"
+          mkdir -p "${RUNNER_TEMP}/dist"
+          cd "${RUNNER_TEMP}/install"
+          export XZ_OPT="-T0"
+          tar -cJf "${RUNNER_TEMP}/dist/${PACKAGE_NAME}" python ssl BUILD_INFO.txt
+          cd "${RUNNER_TEMP}/dist"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${PACKAGE_NAME}" > "${PACKAGE_NAME}.sha256"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "${PACKAGE_NAME}" > "${PACKAGE_NAME}.sha256"
+          else
+            python3 -c "import hashlib; print(f'{hashlib.sha256(open(\"${PACKAGE_NAME}\", \"rb\").read()).hexdigest()}  ${PACKAGE_NAME}')" > "${PACKAGE_NAME}.sha256"
+          fi
+          if [ -n "${PACKAGE_ALIAS:-}" ]; then
+            ALIAS_NAME="python-${PYTHON_VERSION}-boringssl-${BORINGSSL_VERSION}-${PACKAGE_ALIAS}-${RUNNER_ARCH}.tar.xz"
+            cp "${PACKAGE_NAME}" "${ALIAS_NAME}"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${ALIAS_NAME}" > "${ALIAS_NAME}.sha256"
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "${ALIAS_NAME}" > "${ALIAS_NAME}.sha256"
+            else
+              python3 -c "import hashlib; print(f'{hashlib.sha256(open(\"${ALIAS_NAME}\", \"rb\").read()).hexdigest()}  ${ALIAS_NAME}')" > "${ALIAS_NAME}.sha256"
+            fi
+          fi
+          echo "package_name=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "package_path=${RUNNER_TEMP}/dist/${PACKAGE_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Package compiled bundle (Windows)
+        if: matrix.os_family == 'windows'
+        id: package-windows
+        shell: powershell
+        run: |
+          $pkgName = "python-${env:PYTHON_VERSION}-boringssl-${env:BORINGSSL_VERSION}-${env:RUNNER_LABEL}-${env:RUNNER_ARCH}.zip"
+          $distDir = Join-Path $env:RUNNER_TEMP "dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          $pkgPath = Join-Path $distDir $pkgName
+          $installDir = Join-Path $env:RUNNER_TEMP "install"
+          Compress-Archive -Path (Join-Path $installDir "*") -DestinationPath $pkgPath -Force
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $pkgPath).Hash.ToLower()
+          Set-Content -Path "${pkgPath}.sha256" -Value "$hash *$pkgName"
+          if ($env:PACKAGE_ALIAS) {
+            $aliasName = "python-${env:PYTHON_VERSION}-boringssl-${env:BORINGSSL_VERSION}-${env:PACKAGE_ALIAS}-${env:RUNNER_ARCH}.zip"
+            $aliasPath = Join-Path $distDir $aliasName
+            Copy-Item -Path $pkgPath -Destination $aliasPath -Force
+            Set-Content -Path "${aliasPath}.sha256" -Value "$hash *$aliasName"
+          } elseif ($env:RUNNER_LABEL -eq "windows-latest") {
+            $aliasName = "python-${env:PYTHON_VERSION}-boringssl-${env:BORINGSSL_VERSION}-windows-2025-${env:RUNNER_ARCH}.zip"
+            $aliasPath = Join-Path $distDir $aliasName
+            Copy-Item -Path $pkgPath -Destination $aliasPath -Force
+            Set-Content -Path "${aliasPath}.sha256" -Value "$hash *$aliasName"
+          }
+          echo "package_name=$pkgName" >> $env:GITHUB_OUTPUT
+          echo "package_path=$pkgPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/dist/*
+          retention-days: 2
+
+  publish:
+    name: 'Publish GitHub Release'
+    needs: [discover, build]
+    runs-on: ubuntu-slim
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download all matrix build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ./release-assets
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Generate release manifest and checksums
+        id: manifest
+        run: |
+          cd ./release-assets
+          cat *.sha256 > SHA256SUMS.txt || true
+
+          python3 -c "
+          import json, glob, hashlib
+          assets = glob.glob('*.tar.xz') + glob.glob('*.zip')
+          packages = {}
+          for a in assets:
+              h = hashlib.sha256(open(a, 'rb').read()).hexdigest()
+              packages[a] = {'filename': a, 'sha256': h}
+          manifest = {
+              'release_tag': '${{ needs.discover.outputs.release_tag }}',
+              'python_version': '${{ needs.discover.outputs.python_version }}',
+              'boringssl_version': '${{ needs.discover.outputs.boringssl_version }}',
+              'boringssl_commit': '${{ needs.discover.outputs.boringssl_commit }}',
+              'packages': packages
+          }
+          with open('manifest.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+          "
+          ls -la
+
+      - name: Create Immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.discover.outputs.release_tag }}
+          PY_VER: ${{ needs.discover.outputs.python_version }}
+          BSSL_VER: ${{ needs.discover.outputs.boringssl_version }}
+          BSSL_COMMIT: ${{ needs.discover.outputs.boringssl_commit }}
+        run: |
+          RELEASE_TITLE="Python ${PY_VER} + BoringSSL ${BSSL_VER} (${TAG})"
+          RELEASE_NOTES="### Release ${TAG}: Python ${PY_VER} & BoringSSL ${BSSL_VER}
+
+          Compiled with static BoringSSL HEAD (\`${BSSL_COMMIT}\`), TLS 1.2+ floor (SSLv3/TLS 1.0/1.1 disabled), and optimized Python (LTO & PGO).
+
+          Supported Runners and Architectures:
+          - Windows (x64, arm64)
+          - Linux Ubuntu (x64, arm64)
+          - macOS (x64 Intel, arm64 Apple Silicon)
+
+          Consuming projects (such as GAM and GYB) can use this action via floating major version or pinned immutable release:
+          \`\`\`yaml
+          # Use latest stable release via floating major version:
+          - uses: ${{ github.repository }}@v1
+
+          # OR pin this specific immutable release:
+          - uses: ${{ github.repository }}@${TAG}
+          \`\`\`
+          "
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists (force rebuild). Updating assets..."
+            gh release upload "$TAG" ./release-assets/* --clobber
+            gh release edit "$TAG" --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --latest
+          else
+            echo "Publishing new immutable release $TAG..."
+            gh release create "$TAG" ./release-assets/* \
+              --title "$RELEASE_TITLE" \
+              --notes "$RELEASE_NOTES" \
+              --latest
+          fi
+
+      - name: Update floating v1 git tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.discover.outputs.release_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "Updating floating 'v1' git tag to point to commit for release $TAG..."
+          git tag -fa v1 -m "Release $TAG"
+          git push origin v1 --force
