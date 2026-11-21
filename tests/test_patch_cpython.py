@@ -13,6 +13,7 @@ from scripts.patch_cpython import (
     patch_configure_hashlib_check,
     patch_hashopenssl_xof,
     patch_ssl_x509_store_backport,
+    read_boringssl_version_string,
 )
 
 
@@ -41,11 +42,18 @@ class TestPatchCPython(unittest.TestCase):
             "has_ssl_read_write_ex": True,
             "has_x509_store_get1_objects": True,
             "has_psk_cb_typedefs": True,
+            "has_ssl_cipher_get_min_version": True,
         }
-        hdr = generate_compat_header(all_present, disable_tls1x=True)
+        hdr = generate_compat_header(
+            all_present,
+            disable_tls1x=True,
+            version_string="BoringSSL 20261120-ddd732967025 (API v45)",
+        )
         self.assertIn("OPENSSL_NO_TLS1", hdr)
         self.assertIn("_py_bssl_ctx_set_min_proto_version", hdr)
         self.assertIn("_py_bssl_evp_md_do_all", hdr)
+        self.assertIn("BoringSSL 20261120-ddd732967025 (API v45)", hdr)
+        self.assertIn("_py_bssl_ssl_cipher_get_version", hdr)
         self.assertNotIn("SSL_CTX_set_ciphersuites(", hdr)
         self.assertNotIn("SSL_read_ex(", hdr)
         self.assertNotIn("SSL_psk_client_cb_func", hdr)
@@ -122,6 +130,17 @@ class TestPatchCPython(unittest.TestCase):
         for _ in range(2):
             patch_boringssl_win32_headers(self.tmp)
         self.assertEqual(base_h.read_text().count("undef X509_NAME"), 1)
+
+    def test_read_boringssl_version_string(self):
+        import json
+        (self.tmp / "BORINGSSL_METADATA.json").write_text(
+            json.dumps({"version": "20261120-ddd732967025", "api_version": "45"}),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            read_boringssl_version_string(self.tmp),
+            "BoringSSL 20261120-ddd732967025 (API v45)",
+        )
 
 
 if __name__ == "__main__":
