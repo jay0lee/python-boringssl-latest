@@ -205,13 +205,6 @@ def probe_capabilities(boringssl_dir, compiler=None):
             """,
             r"\bSSL_psk_client_cb_func\b",
         ),
-        "has_ssl_cipher_get_min_version": (
-            """
-            #include <openssl/ssl.h>
-            uint16_t test(const SSL_CIPHER *c) { return SSL_CIPHER_get_min_version(c); }
-            """,
-            r"\bSSL_CIPHER_get_min_version\s*\(",
-        ),
     }
 
     caps = {}
@@ -537,27 +530,6 @@ def generate_compat_header(caps, disable_tls1x=True, version_string="BoringSSL")
             "    unsigned char *psk, unsigned int max_psk_len);",
             "typedef unsigned int (*SSL_psk_server_cb_func)(",
             "    SSL *ssl, const char *identity, unsigned char *psk, unsigned int max_psk_len);",
-            "",
-        ])
-
-    if caps.get("has_ssl_cipher_get_min_version"):
-        lines.extend([
-            "/* BoringSSL hardcodes SSL_CIPHER_get_version() to \"TLSv1/SSLv3\"; derive it from",
-            " * SSL_CIPHER_get_min_version() so sock.cipher()[1] matches OpenSSL (e.g. TLSv1.3). */",
-            "static inline const char *_py_bssl_ssl_cipher_get_version(const SSL_CIPHER *cipher) {",
-            "    if (cipher == NULL) {",
-            "        return \"(NONE)\";",
-            "    }",
-            "    uint16_t min_ver = SSL_CIPHER_get_min_version(cipher);",
-            "    if (min_ver >= TLS1_3_VERSION) {",
-            "        return \"TLSv1.3\";",
-            "    }",
-            "    if (min_ver >= TLS1_2_VERSION) {",
-            "        return \"TLSv1.2\";",
-            "    }",
-            "    return \"TLSv1/SSLv3\";",
-            "}",
-            "#define SSL_CIPHER_get_version(cipher) _py_bssl_ssl_cipher_get_version((cipher))",
             "",
         ])
 

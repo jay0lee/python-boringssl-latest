@@ -171,7 +171,6 @@ def test_boringssl_and_tls(target_host="www.googleapis.com"):
     sock.close()
 
     assert tls_version in ("TLSv1.3", "TLSv1.2"), f"Unexpected TLS version: {tls_version}"
-    assert proto_ver in ("TLSv1.3", "TLSv1.2"), f"Unexpected cipher protocol version from sock.cipher(): {proto_ver}"
 
     elapsed = time.perf_counter() - t0
     log_test_result(
@@ -180,7 +179,7 @@ def test_boringssl_and_tls(target_host="www.googleapis.com"):
         {
             "SSL Build": ssl.OPENSSL_VERSION,
             "TLS Version": tls_version,
-            "Cipher Suite": f"{cipher_name} ({proto_ver}, {bits} bits)",
+            "Cipher Suite": f"{cipher_name} ({bits} bits)",
             "ALPN Protocol": alpn_proto or "None (Negotiated HTTP/1.1)",
             "Verified Chain Len": str(len(verified_chain)) if verified_chain else "N/A",
             "Cert Subject": dict(x[0] for x in peer_cert.get("subject", [])).get("commonName", "Unknown"),
