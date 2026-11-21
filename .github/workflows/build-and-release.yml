@@ -2,8 +2,8 @@ name: 'Build and Release Python + BoringSSL'
 
 on:
   schedule:
-    # Run weekly every Sunday at 04:00 UTC
-    - cron: '0 4 * * 0'
+    # Run weekly every Wednesday at 04:00 UTC (staggered from Sunday's python-openssl-latest build)
+    - cron: '0 4 * * 3'
   workflow_dispatch:
     inputs:
       python_version:
