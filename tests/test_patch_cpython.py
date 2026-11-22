@@ -133,7 +133,7 @@ class TestPatchCPython(unittest.TestCase):
         import json
         (self.tmp / "BORINGSSL_METADATA.json").write_text(
             json.dumps({"version": "20261120-ddd732967025", "api_version": "45"}),
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
         self.assertEqual(
             read_boringssl_version_string(self.tmp),

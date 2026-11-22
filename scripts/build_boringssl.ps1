@@ -117,7 +117,7 @@ $metadata = @{
     platform    = "Windows ($Arch)"
     compiler    = "MSVC"
 } | ConvertTo-Json -Depth 4
-[System.IO.File]::WriteAllText((Join-Path $InstallDir "BORINGSSL_METADATA.json"), $metadata, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText((Join-Path $InstallDir "BORINGSSL_METADATA.json"), $metadata, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host "BoringSSL build completed successfully."
 Get-ChildItem "$InstallDir\lib", "$InstallDir\bin" -ErrorAction SilentlyContinue

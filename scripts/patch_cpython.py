@@ -228,7 +228,7 @@ def read_boringssl_version_string(boringssl_dir):
     meta_path = bdir / "BORINGSSL_METADATA.json"
     if meta_path.is_file():
         try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            data = json.loads(meta_path.read_text(encoding="utf-8-sig"))
             version = data.get("version") or None
             api_version = data.get("api_version") or None
         except Exception:

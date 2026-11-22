@@ -46,7 +46,7 @@ def get_boringssl_info(ssl_root=None):
     meta_path = os.path.join(ssl_root, "BORINGSSL_METADATA.json")
     if os.path.isfile(meta_path):
         try:
-            with open(meta_path, "r", encoding="utf-8") as f:
+            with open(meta_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             for k in info:
                 if k in data and data[k]:

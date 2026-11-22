@@ -69,7 +69,7 @@ class TestBuildInfo(unittest.TestCase):
             "api_version": "45",
             "platform": "Linux (x64)",
         }
-        with open(os.path.join(self.temp_dir, "BORINGSSL_METADATA.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(self.temp_dir, "BORINGSSL_METADATA.json"), "w", encoding="utf-8-sig") as f:
             json.dump(meta, f)
 
         info = get_boringssl_info(ssl_root=self.temp_dir)

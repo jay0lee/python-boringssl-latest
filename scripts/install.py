@@ -442,7 +442,7 @@ def main():
             env=run_env,
         ).decode().strip()
         ssl_ver_out = bssl_info.get("version") or subprocess.check_output(
-            [py_bin, "-c", "import ssl; print(ssl.OPENSSL_VERSION)"],
+            [py_bin, "-c", "import ssl; print(ssl.OPENSSL_VERSION.split()[1] if ' ' in ssl.OPENSSL_VERSION else ssl.OPENSSL_VERSION)"],
             env=run_env,
         ).decode().strip()
         with open(github_output, "a", encoding="utf-8") as f:
